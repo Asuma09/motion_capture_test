@@ -12,25 +12,29 @@ import GameplayKit
 class ViewController: NSViewController {
 
     @IBOutlet var skView: SKView!
-    
+
+    private let handTracker = HandTracker()
+
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        if let view = self.skView {
-            // Load the SKScene from 'GameScene.sks'
-            if let scene = SKScene(fileNamed: "GameScene") {
-                // Set the scale mode to scale to fit the window
-                scene.scaleMode = .aspectFill
-                
-                // Present the scene
-                view.presentScene(scene)
-            }
-            
-            view.ignoresSiblingOrder = true
-            
-            view.showsFPS = true
-            view.showsNodeCount = true
+        guard let view = skView, let scene = SKScene(fileNamed: "GameScene") as? GameScene else {
+            return
         }
+
+        scene.scaleMode = .aspectFill
+        handTracker.delegate = scene
+        view.presentScene(scene)
+
+        view.ignoresSiblingOrder = true
+        view.showsFPS = true
+        view.showsNodeCount = true
+
+        handTracker.start()
+    }
+
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        handTracker.stop()
     }
 }
-
