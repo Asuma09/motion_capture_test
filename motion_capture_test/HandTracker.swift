@@ -30,11 +30,17 @@ final class HandTracker: NSObject {
         return r
     }()
 
-    private var lastPosition: CGPoint?
     private var lastTimestamp: CFTimeInterval = 0
     private var punchCooldownUntil: CFTimeInterval = 0
 
-    private let punchSpeedThreshold: CGFloat = 2.8
+    // Ring buffer of (timestamp, palm size) used to compute palm-growth rate
+    // over a stable time window. Growth represents forward motion toward the
+    // camera — a real punch — and ignores lateral swipes.
+    private var palmHistory: [(time: CFTimeInterval, size: CGFloat)] = []
+
+    private let punchGrowthThreshold: CGFloat = 0.45 // normalized palm-size units / sec
+    private let punchWindow: CFTimeInterval = 0.12   // measure growth over ~120 ms
+    private let historyCutoff: CFTimeInterval = 0.5
     private let punchCooldown: CFTimeInterval = 0.35
 
     func start() {
@@ -121,42 +127,59 @@ extension HandTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
 
     private func process(observation: VNHumanHandPoseObservation?) {
         guard let observation else {
+            resetTracking()
             emit(position: nil, speed: 0, didPunch: false)
             return
         }
 
-        // Prefer the middle MCP joint (knuckle) — it's stable and central to the palm.
-        let point = (try? observation.recognizedPoint(.middleMCP))
-            ?? (try? observation.recognizedPoint(.wrist))
-
-        guard let point, point.confidence > 0.3 else {
+        // Need both wrist and middle MCP: middle MCP is the cursor anchor,
+        // and the wrist→middleMCP distance is our 2D proxy for palm size.
+        guard let middle = try? observation.recognizedPoint(.middleMCP),
+              let wrist = try? observation.recognizedPoint(.wrist),
+              middle.confidence > 0.3, wrist.confidence > 0.3 else {
+            resetTracking()
             emit(position: nil, speed: 0, didPunch: false)
             return
         }
 
         // Vision uses a bottom-left origin in normalized [0,1]. Mirror X so the
         // on-screen indicator follows the user like a mirror.
-        let position = CGPoint(x: 1.0 - point.location.x, y: point.location.y)
-        let now = CACurrentMediaTime()
+        let position = CGPoint(x: 1.0 - middle.location.x, y: middle.location.y)
 
-        var speed: CGFloat = 0
+        // Palm size in normalized image coordinates. As the hand moves toward
+        // the camera, this distance grows; lateral swipes leave it unchanged.
+        let palmDx = middle.location.x - wrist.location.x
+        let palmDy = middle.location.y - wrist.location.y
+        let palmSize = sqrt(palmDx * palmDx + palmDy * palmDy)
+
+        let now = CACurrentMediaTime()
+        palmHistory.append((time: now, size: palmSize))
+        let cutoff = now - historyCutoff
+        palmHistory.removeAll { $0.time < cutoff }
+
+        // Compare against the oldest sample at least `punchWindow` seconds in
+        // the past — a fixed-window derivative is much less noisy than a
+        // single-frame delta.
+        var growthRate: CGFloat = 0
         var didPunch = false
-        if let last = lastPosition, lastTimestamp > 0 {
-            let dt = CGFloat(now - lastTimestamp)
+        if let baseline = palmHistory.first(where: { now - $0.time >= punchWindow }) {
+            let dt = CGFloat(now - baseline.time)
             if dt > 0 {
-                let dx = position.x - last.x
-                let dy = position.y - last.y
-                speed = sqrt(dx * dx + dy * dy) / dt
-                if speed > punchSpeedThreshold && now > punchCooldownUntil {
+                growthRate = (palmSize - baseline.size) / dt
+                if growthRate > punchGrowthThreshold && now > punchCooldownUntil {
                     didPunch = true
                     punchCooldownUntil = now + punchCooldown
                 }
             }
         }
 
-        lastPosition = position
         lastTimestamp = now
-        emit(position: position, speed: speed, didPunch: didPunch)
+        emit(position: position, speed: growthRate, didPunch: didPunch)
+    }
+
+    private func resetTracking() {
+        palmHistory.removeAll(keepingCapacity: true)
+        lastTimestamp = 0
     }
 
     private func emit(position: CGPoint?, speed: CGFloat, didPunch: Bool) {

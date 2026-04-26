@@ -244,7 +244,7 @@ extension GameScene: HandTrackerDelegate {
             return
         }
 
-        statusLabel.text = String(format: "Tracking  speed %.1f", Double(speed))
+        statusLabel.text = String(format: "Tracking  growth %+.2f/s", Double(speed))
         handIndicator.isHidden = false
 
         let anchor = anchorPoint
